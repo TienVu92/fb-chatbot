@@ -1,3 +1,125 @@
-# fb-chatbot
+import os
+import sqlite3
+from flask import Flask, request
+import requests
+import google.generativeai as genai
 
-This is a placeholder for the main application file for the chatbot.
+app = Flask(__name__)
+
+# ===== CONFIG =====
+FB_PAGE_TOKEN = os.environ.get("FB_PAGE_TOKEN")
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-1.5-flash-latest")
+
+DB_NAME = "chat.db"
+
+# ===== INIT DATABASE =====
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ===== SAVE MESSAGE =====
+def save_message(user_id, role, content):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
+        (user_id, role, content)
+    )
+    conn.commit()
+    conn.close()
+
+# ===== GET LAST 5 MESSAGES =====
+def get_last_messages(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        SELECT role, content FROM messages
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 5
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+
+    # đảo ngược lại cho đúng thứ tự
+    rows.reverse()
+
+    history = ""
+    for role, content in rows:
+        history += f"{role}: {content}\n"
+
+    return history
+
+# ===== SEND MESSAGE TO FACEBOOK =====
+def send_message(recipient_id, text):
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={FB_PAGE_TOKEN}"
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text}
+    }
+    requests.post(url, json=payload)
+
+# ===== WEBHOOK VERIFY =====
+@app.route("/webhook", methods=["GET"])
+def verify():
+    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
+        return request.args.get("hub.challenge")
+    return "Verification failed"
+
+# ===== WEBHOOK RECEIVE =====
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json
+
+    for entry in data.get("entry", []):
+        for msg in entry.get("messaging", []):
+            sender_id = msg["sender"]["id"]
+
+            if "message" in msg and "text" in msg["message"]:
+                user_text = msg["message"]["text"]
+
+                # Lưu tin nhắn user
+                save_message(sender_id, "user", user_text)
+
+                # Lấy 5 tin gần nhất
+                history = get_last_messages(sender_id)
+
+                prompt = f"""
+                Bạn là chatbot bán hàng.
+                Đây là lịch sử 5 tin nhắn gần nhất:
+                {history}
+
+                Trả lời khách chuyên nghiệp, ngắn gọn.
+                """
+
+                response = model.generate_content(prompt)
+                bot_reply = response.text
+
+                # Lưu tin bot
+                save_message(sender_id, "bot", bot_reply)
+
+                # Gửi lại Messenger
+                send_message(sender_id, bot_reply)
+
+    return "OK", 200
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
