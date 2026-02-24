@@ -13,15 +13,61 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ===== CONFIG =====
-FB_PAGE_TOKEN = os.getenv("FB_PAGE_TOKEN", "")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+FB_PAGE_TOKEN = os.getenv("FB_PAGE_TOKEN", "EAAbVbICieEsBQyNJIHkPy36edK0HUKbakICFBGcKXfL72KHD68QOMl4VI6omIVMJxLgyZBXMrjjWsnOXvh7jqlNum4DN6SwwDKvG0ZAflTJn1SgtQkbZAvhTfsOZCCwFMnF0dcMJrGZAsSR5NOZB906aP3yY14zlizHbxcIHe34zUQTw9ApZBZCBFMG9m8WSF9v1a0gxZBZAz3gxOWzg18mEADcRlhtZBDCGQ5zQBmEE39gyzg6QZA72lAkeRcOZASyORvwSX1lGOlZCA8SgLJQHNeTZCjEXSXJ")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secure_token_123")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDkMZDJ0IKOhSGnD_rq3IXmG9gem1AV51Q")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+AI_LOG_PREVIEW_CHARS = int(os.getenv("AI_LOG_PREVIEW_CHARS", "300"))
 
 model = None
+
+
+def normalize_model_name(model_name):
+    if not model_name:
+        return ""
+    return model_name.replace("models/", "")
+
+
+def select_supported_model(preferred_model):
+    try:
+        available_models = []
+        for gemini_model in genai.list_models():
+            methods = getattr(gemini_model, "supported_generation_methods", []) or []
+            if "generateContent" in methods:
+                available_models.append(normalize_model_name(gemini_model.name))
+
+        if not available_models:
+            logger.warning("No Gemini model supports generateContent in this project/API scope")
+            return preferred_model
+
+        candidate_models = [
+            normalize_model_name(preferred_model),
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-pro-latest",
+            "gemini-1.5-flash-8b-latest",
+        ]
+
+        for candidate in candidate_models:
+            if candidate and candidate in available_models:
+                return candidate
+
+        selected = available_models[0]
+        logger.warning(
+            "Preferred model '%s' is unavailable. Using '%s' instead.",
+            preferred_model,
+            selected,
+        )
+        return selected
+    except Exception:
+        logger.exception("Failed to list Gemini models. Falling back to configured model name.")
+        return preferred_model
+
+
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    selected_model_name = select_supported_model(GEMINI_MODEL)
+    model = genai.GenerativeModel(selected_model_name)
+    logger.info("Using Gemini model: %s", selected_model_name)
 else:
     logger.warning("GEMINI_API_KEY is missing. AI responses will use fallback text.")
 
@@ -160,6 +206,16 @@ Trả lời khách chuyên nghiệp, ngắn gọn.
 """
 
 
+def to_log_preview(text, max_chars=AI_LOG_PREVIEW_CHARS):
+    if text is None:
+        return ""
+
+    normalized = str(text).replace("\n", " ").strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[:max_chars]}..."
+
+
 def generate_bot_reply(prompt):
     fallback = "Xin lỗi, tôi chưa thể phản hồi ngay lúc này."
 
@@ -220,6 +276,7 @@ def webhook():
         prompt = build_prompt(history, user_text)
         bot_reply = generate_bot_reply(prompt)
         logger.info("Generated bot reply for sender_id=%s reply_len=%s", sender_id, len(bot_reply))
+        logger.info("AI reply preview sender_id=%s text=%s", sender_id, to_log_preview(bot_reply))
 
         # Lưu tin bot
         save_message(sender_id, "bot", bot_reply)
@@ -231,4 +288,4 @@ def webhook():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=10001, debug=True)
